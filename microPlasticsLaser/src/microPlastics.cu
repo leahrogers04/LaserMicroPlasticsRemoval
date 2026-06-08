@@ -112,6 +112,7 @@ double UpY;
 double UpZ;
 
 #include "./forceFunctions.h"
+#include "./histogram.h"
 
 // Prototyping functions
 void readSimulationParameters();
@@ -465,6 +466,7 @@ void polymerShakeUp(float4 *pos, float4 *vel, float4 *force, int *linkA, int *li
 	cudaMemcpy( BodyPosition, BodyPositionGPU, NumberOfBodies*sizeof(float4), cudaMemcpyDeviceToHost );
 	cudaMemcpy( BodyVelocity, BodyVelocityGPU, NumberOfBodies*sizeof(float4), cudaMemcpyDeviceToHost );
 	cudaMemcpy( BodyForce, BodyForceGPU, NumberOfBodies*sizeof(float4), cudaMemcpyDeviceToHost );
+
 	
 	printf("\n Polymers have been shoken up.\n");
 }
@@ -965,8 +967,17 @@ void nBody()
 		if(DrawTimer == DrawRate) 
 		{
 			cudaMemcpy( BodyPosition, BodyPositionGPU, NumberOfBodies*sizeof(float4), cudaMemcpyDeviceToHost );
+			cudaMemcpy( BodyVelocity, BodyVelocityGPU, NumberOfBodies*sizeof(float4), cudaMemcpyDeviceToHost );
+			cudaMemcpy( BodyForce, BodyForceGPU, NumberOfBodies*sizeof(float4), cudaMemcpyDeviceToHost );
+			//updateMomentumHistograms(BodyVelocity, BodyForce, NumberOfPolymers, NumberOfBodies);
 			drawPicture();
 			//printf("\n Time = %f", RunTime);
+
+			//update and redraw the histogram every time we draw the main window. This way the histogram is not slowing down the main window.
+			updateMomentumHistograms(BodyVelocity, BodyForce, NumberOfPolymers, NumberOfBodies);
+			glutSetWindow(HistogramWindow);
+			glutPostRedisplay();
+			glutSetWindow(Window); //switching back to the main window.
 			DrawTimer = 0;
 		}
 		
@@ -1343,6 +1354,10 @@ int main(int argc, char** argv)
 	glutMouseFunc(mymouse);
 	glutKeyboardFunc(KeyPressed);
 	glutIdleFunc(idle);
+
+	int numMicroplastics = NumberOfBodies - NumberOfPolymers;
+	createHistogramWindow(argc, argv, numMicroplastics);
+
 	glutMainLoop();
 	
 	return 0;

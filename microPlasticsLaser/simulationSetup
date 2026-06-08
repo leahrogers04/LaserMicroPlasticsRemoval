@@ -6,7 +6,7 @@ Time Unit is millisecond or 10E-3 seconds (ms)
 
 ******************** MICROPLASTIC INFO **************************************
 This should be the number of microplastics you want to be randomly distributed in the solution.
-NumberOfMicroPlastics = 512;
+NumberOfMicroPlastics = 1024;
 
 The max intial velocity used in setting up the microplastics. It is a max for the x, y, and z velocities not the actual mav velocity.
 MaxMicroPlastics1DVelocity = 1000.0;
