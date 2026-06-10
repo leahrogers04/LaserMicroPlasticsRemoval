@@ -7,7 +7,7 @@ __device__ float4 getDragForces(float, float4);
 __device__ float4 getLaserForces(float4);
 __device__ float4 getContainerForces(float4, float , float);
 __device__ float4 getStirringForces(curandState_t*, int, float4, float4, float, float, float);
-__device__ float4 brownian_motion(curandState_t*, int);
+__device__ float4 brownian_motion(curandState_t*, int, float4, float);
 
 /******************************************************************************
  This function just shakes the whole system up
@@ -310,11 +310,90 @@ __device__ float4 getStirringForces(curandState_t* states, int id, float4 posMe,
 	return(f);
 }
 
+/*********************************************************************************
+Brownian Motion using Langevin Equation and Wiener Process
+ 
+[1] Simulation of a Brownian particle in an optical trap https://doi.org/10.1119/1.4772632:
+ where W(t) is a Wiener process which is the white noise term that models the random collisions with the fluid molecules.
+
+[2] ThorLabs user guide 
+
+ The Langevin equation ([1], Eq. 1):
+	m*x_ddot = -gamma*x_dot + sqrt(2*k_B*T*gamma)*W(t)
+
+ The thermal noise amplitude sqrt(2*k_B*T*gamma) comes from the 
+ fluctuation-dissipation theorem as shown in the Volpe paper.
+ 
+Wiener process properties ([1], section 2 below Eq. 1):
+  "W(t) is characterized by: mean <W(t)> = 0 for all t; 
+      <W(t)^2> = 1 for each value t; and W(t1) and W(t2) are 
+      independent of each other for t1 != t2"
+
+Stokes frictional force ([2], Section 7.5, Eq. 22):
+      F_R = 6*pi*eta*R*v
+ This implies the drag coefficient gamma = 6*pi*eta*R
+ 
+ The finite difference approach from [1] uses:
+     x_i = x_{i-1} + sqrt(2*D*Dt) * w_i
+ where w_i is N(0,1) and N(0,1) is a Gaussian random number with zero mean and unit variance. and D = k_B*T/gamma is the diffusion coefficient.
+
+ Smaller particles move more ([2], Section 7.5):
+     "The 1 um spheres can be more easily sent into motion by impact 
+      with the water molecules than larger spheres"
+
+
+ Key change from original: using curand_normal() (Gaussian) instead of 
+ curand_uniform() (uniform) for proper Wiener process statistics [1].
+
+*********************************************************************************/
+__device__ float4 brownian_motion(curandState_t* states, int id, float4 pos, float dt)
+{
+	float4 f;
+
+	// get particle radius from diameter stored in pos.w
+	float radius = pos.w / 2.0f;
+
+	// physical params
+	float temperature = 298.0f; // room temperature in K
+	float eta = 1.0e-3f; // effective viscosity of the water in Pa*s (kg/(m*s))
+
+	 // Drag coefficient gamma = 6*pi*eta*R 
+    // (derived from Stokes frictional force F_R = 6*pi*eta*R*v, 
+    //  ThorLabs Section 7.5.2, Eq. 22)
+    float gamma = 6.0f * PI * eta * radius;
+    
+    // Diffusion coefficient D = k_B*T/gamma
+    // This relates to ThorLabs Eq. 23: m = 2*k_B*T/(3*pi*eta*R)
+    float D = K_BOLTZMANN * temperature / gamma;
+    
+    // From Volpe & Volpe finite difference solution:
+    // x_i = x_{i-1} + sqrt(2*D*Dt) * w_i
+    // To convert to force: F = displacement * gamma / dt
+    // This gives: F = sqrt(2*D*gamma^2/dt) * w_i = sqrt(2*k_B*T*gamma/dt) * w_i
+    float thermalAmplitude = sqrtf(2.0f * D * gamma * gamma / dt);
+    
+    // Wiener process: Gaussian random numbers N(0,1)
+    // From Volpe & Volpe: "w_i are random numbers with zero mean and unit variance"
+    float dW_x = curand_normal(&states[id]);
+    float dW_y = curand_normal(&states[id]);
+    float dW_z = curand_normal(&states[id]);
+    
+    f.x = thermalAmplitude * dW_x;
+    f.y = thermalAmplitude * dW_y;
+    f.z = thermalAmplitude * dW_z;
+    f.w = 0.0f;
+    
+    return f;
+}
+
+
+
 /******************************************************************************
  This is the Brownian Motion function.
  Place any comments and papers you used to get parameters for this function here.
  The below commented out function is one I ased to get Brownian Motion in another project.
 *******************************************************************************/
+/*
 __device__ float4 brownian_motion(curandState_t* states, int id)
 {
 	float mag = 100.0;
@@ -329,6 +408,7 @@ __device__ float4 brownian_motion(curandState_t* states, int id)
 	
 	return(f);
 }
+*/
 
 // This is an example of brownian motion I used in another project.
 /*

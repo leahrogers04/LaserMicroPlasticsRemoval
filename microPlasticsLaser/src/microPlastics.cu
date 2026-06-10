@@ -24,6 +24,8 @@ FILE* ffmpeg;
 #define PI 3.141592654
 #define BLOCK 256
 
+#define K_BOLTZMANN 1.38e-23f	//boltzmann constant in J/K
+
 FILE* MovieFile;
 int* Buffer;
 int MovieFlag; // 0 movie off, 1 movie on
@@ -69,6 +71,11 @@ int ViewFlag; // 0 orthoganal, 1 fulstum
 int TopView;
 int NumberOfBodies;
 int NumberOfPolymers;
+
+//flags for container on or off and particle interactions on or off
+int ContainerFlag;
+int ParticleInteractionFlag;
+
 float4 *BodyPosition, *BodyVelocity, *BodyForce;
 float4 *BodyPositionGPU, *BodyVelocityGPU, *BodyForceGPU;
 int *PolymerChainLength;
@@ -82,6 +89,7 @@ float4 CenterOfSimulation;
 float4 DistanceFromCenter = make_float4(0.0, 0.0, 0.0, 0.0);
 float4 AngleOfSimulation;
 float ShakeItUpMag;
+
 
 int DebugFlag;
 int RadialConfinementViewingAids;
@@ -124,7 +132,7 @@ void setInitailConditions();
 void drawPicture();
 void errorCheck(const char*);
 __global__ void init_curand(unsigned int, curandState_t*);
-__global__ void getForces(curandState_t*, float4 *, float4 *, float4 *, int *, int *, float, int, int, float, float, float, int, float, int, float, int, float, int, int, int );
+__global__ void getForces(curandState_t*, float4 *, float4 *, float4 *, int *, int *, float, int, int, float, float, float, int, float, int, float, int, float, int, int, int, float);
 __global__ void moveBodies(float4 *, float4 *, float4 *, float, int);
 void nBody();
 float3 getLinearMomentumOfMicroplastics();
@@ -712,6 +720,7 @@ void drawPicture()
 		glutSolidSphere(DiameterOfMicroPlasticMax, 30, 30);
 	glPopMatrix();
 	
+	/*
 	// Drawing the outline of the Beaker.
 	if(RadialConfinementViewingAids == 1)
 	{
@@ -749,7 +758,7 @@ void drawPicture()
 			glEnd();
 		}
 	}
-	
+	*/
 	// Drawing the stirring.
 	if(StirFlag == 1)
 	{
@@ -796,7 +805,7 @@ __global__ void init_curand(unsigned int seed, curandState_t* states)
 /******************************************************************************
  This function controlls all the forces that act on the bodies.
 *******************************************************************************/
-__global__ void getForces(curandState_t* states, float4 *pos, float4 *vel, float4 *force, int *linkA, int *linkB, float length, int nPolymer, int nPlastics, float beakerRadius, float fluidHeight, float fluidDensity, int stirFlag, float theta, int shakeItUpFlag, float ShakeItUpMag, int dragFlag, float drag, int laserFlag, int gravityFlag, int brownianFlag)
+__global__ void getForces(curandState_t* states, float4 *pos, float4 *vel, float4 *force, int *linkA, int *linkB, float length, int nPolymer, int nPlastics, float beakerRadius, float fluidHeight, float fluidDensity, int stirFlag, float theta, int shakeItUpFlag, float ShakeItUpMag, int dragFlag, float drag, int laserFlag, int gravityFlag, int brownianFlag, int containerFlag, int particleInteractionFlag, float dt)
 {
 	int myId, yourId;
 	int nBodies;
@@ -828,6 +837,9 @@ __global__ void getForces(curandState_t* states, float4 *pos, float4 *vel, float
 		forceVectorSum.y = 0.0;
 		forceVectorSum.z = 0.0;
 		
+	// ===WRAPPED WITH PARTICLE INTERACTION FLAG===
+	if(particleInteractionFlag == 1)
+	{
 		for(yourId = 0; yourId < nBodies; yourId++)
 		{
 			posYou.x = pos[yourId].x;
@@ -869,6 +881,8 @@ __global__ void getForces(curandState_t* states, float4 *pos, float4 *vel, float
 			    	forceVectorSum.z += forceVector.z;
 		    	}
 		}
+	}
+	//==END OF PARTICLE INTERACTION WRAP===
 		
 		// This adds on a gravity pull based on density
 		if(gravityFlag == 1)
@@ -879,11 +893,16 @@ __global__ void getForces(curandState_t* states, float4 *pos, float4 *vel, float
 			forceVectorSum.z += forceVector.z;
 		}
 		
+		//===WRAPPED WITH CONTAINER FLAG===
+		if(containerFlag == 1)
+		{
 		// This adds on the forces to keep the bodies in the container.
 		forceVector = getContainerForces(posMe, beakerRadius, fluidHeight);
 		forceVectorSum.x += forceVector.x;
 		forceVectorSum.y += forceVector.y;
 		forceVectorSum.z += forceVector.z;
+		}
+		//===END OF CONTAINER FLAG WRAP===
 		
 		// This adds on the forces caused by stirring.
 		if(stirFlag == 1)
@@ -896,7 +915,7 @@ __global__ void getForces(curandState_t* states, float4 *pos, float4 *vel, float
 		
 		if(brownianFlag == 1)
 		{
-			forceVector = brownian_motion(states, myId);
+			forceVector = brownian_motion(states, myId, posMe, dt);
 			forceVectorSum.x += forceVector.x;
 			forceVectorSum.y += forceVector.y;
 			forceVectorSum.z += forceVector.z;
@@ -958,7 +977,7 @@ void nBody()
 {
 	if(Pause != 1)
 	{	
-		getForces<<<Grids, Blocks>>>(DevStates, BodyPositionGPU, BodyVelocityGPU, BodyForceGPU, PolymerConnectionAGPU, PolymerConnectionBGPU, PolymersConnectionLength, NumberOfPolymers, NumberOfMicroPlastics, BeakerRadius, FluidHeight, FluidDensity, StirFlag, Theta, ShakeItUpFlag, ShakeItUpMag, DragFlag, Drag, LaserFlag, GravityFlag, BrownianFlag);
+		getForces<<<Grids, Blocks>>>(DevStates, BodyPositionGPU, BodyVelocityGPU, BodyForceGPU, PolymerConnectionAGPU, PolymerConnectionBGPU, PolymersConnectionLength, NumberOfPolymers, NumberOfMicroPlastics, BeakerRadius, FluidHeight, FluidDensity, StirFlag, Theta, ShakeItUpFlag, ShakeItUpMag, DragFlag, Drag, LaserFlag, GravityFlag, BrownianFlag, ContainerFlag, ParticleInteractionFlag, Dt);
 		errorCheck("getForces");
 		moveBodies<<<Grids, Blocks>>>(BodyPositionGPU, BodyVelocityGPU, BodyForceGPU, Dt, NumberOfBodies);
 		errorCheck("moveBodies");
@@ -1267,12 +1286,18 @@ void setup()
 	TopView = 1;
 	LaserFlag = 0;
 	GravityFlag = 0;
-	BrownianFlag = 0;
+	BrownianFlag = 1;
 	RadialConfinementViewingAids = 1;
 	StirFlag = 0;
 	ShakeItUpFlag = 0;
 	DebugFlag = 0;
 	Theta = 0.0;
+
+	DragFlag = 1;      // Turn ON for proper Brownian motion physics
+	UsedDrag = Drag;   // Set UsedDrag to the value read from simulationSetup
+	ContainerFlag = 0; //0 container off, 1 container on 
+	ParticleInteractionFlag = 0; // 0 particle interactions off, 1 particle interactions on.
+
 	StirAngularVelosity = (2.0*PI)/(100.0); // This is 10 revolution per second in milliseconds
 	
 	CenterOfSimulation.x = 0.0;
