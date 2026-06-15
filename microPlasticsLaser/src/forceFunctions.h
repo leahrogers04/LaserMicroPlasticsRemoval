@@ -160,20 +160,31 @@ __device__ float4 getMicroPlasticMicroPlasticForce(float4 p0, float4 p1)
 /******************************************************************************
  This is the gravity function add complexity at will.
 *******************************************************************************/
-__device__ float4 getGravityForces(float density, float mass, float fluidDensity)
+__device__ float4 getGravityForces(float density_plastic, float mass, float density_fluid)
 {
-	float4 f;
-	float G = 9.81; // When you take meters/second^2 to micrometers/millisecond^2 everything cancels out so you get 9.81
-	f.x = 0.0;
-	f.z = 0.0;
-	
-	// May want to do something more accurate. I just made a linear function that  pulled stuff dowm if its density is
-	// greater than the fluid pushed it up if its density is less than the fluid.
-	f.y = -G*mass*(density - fluidDensity);
-	
-	return(f);
-}
+    float4 f;
+    float G = 9.81f;  // acceleration due to gravity
 
+    // Volume of the plastic particle: V_plastic = mass / density_plastic
+    float V_plastic = mass / density_plastic;
+
+    // Weight: W = density_plastic * V_plastic * g
+    float W = density_plastic * V_plastic * G;
+
+    // Buoyancy: B = density_fluid * V_plastic * g
+    float B = density_fluid * V_plastic * G;
+
+    // Your exact formula: B - W = (density_fluid - density_plastic) * V_plastic * g
+    float netForce = B - W;  // equivalent to (density_fluid - density_plastic) * V_plastic * G
+
+    // Apply net force in y-direction (vertical)
+    f.x = 0.0f;
+    f.y = netForce;  // positive = floats up, negative = sinks down
+    f.z = 0.0f;
+    f.w = 0.0f;
+
+    return f;
+}
 /******************************************************************************
  This is the fluid drag force function.
 *******************************************************************************/
@@ -345,102 +356,90 @@ Stokes frictional force ([2], Section 7.5, Eq. 22):
  Key change from original: using curand_normal() (Gaussian) instead of 
  curand_uniform() (uniform) for proper Wiener process statistics [1].
 
+ but i need to make the diffusion coefficient D = sqrt(7microns) where R = 5microns and this has to happen in 50 seconds with drag
 *********************************************************************************/
-__device__ float4 brownian_motion(curandState_t* states, int id, float4 pos, float dt)
-{
-	float4 f;
-
-	// get particle radius from diameter stored in pos.w
-	float radius = pos.w / 2.0f;
-
-	// physical params
-	float temperature = 298.0f; // room temperature in K
-	float eta = 1.0e-3f; // effective viscosity of the water in Pa*s (kg/(m*s))
-
-	 // Drag coefficient gamma = 6*pi*eta*R 
-    // (derived from Stokes frictional force F_R = 6*pi*eta*R*v, 
-    //  ThorLabs Section 7.5.2, Eq. 22)
-    float gamma = 6.0f * PI * eta * radius;
-    
-    // Diffusion coefficient D = k_B*T/gamma
-    // This relates to ThorLabs Eq. 23: m = 2*k_B*T/(3*pi*eta*R)
-    float D = K_BOLTZMANN * temperature / gamma;
-    
-    // From Volpe & Volpe finite difference solution:
-    // x_i = x_{i-1} + sqrt(2*D*Dt) * w_i
-    // To convert to force: F = displacement * gamma / dt
-    // This gives: F = sqrt(2*D*gamma^2/dt) * w_i = sqrt(2*k_B*T*gamma/dt) * w_i
-    float thermalAmplitude = sqrtf(2.0f * D * gamma * gamma / dt);
-    
-    // Wiener process: Gaussian random numbers N(0,1)
-    // From Volpe & Volpe: "w_i are random numbers with zero mean and unit variance"
-    float dW_x = curand_normal(&states[id]);
-    float dW_y = curand_normal(&states[id]);
-    float dW_z = curand_normal(&states[id]);
-    
-    f.x = thermalAmplitude * dW_x;
-    f.y = thermalAmplitude * dW_y;
-    f.z = thermalAmplitude * dW_z;
-    f.w = 0.0f;
-    
-    return f;
-}
 
 
 
 /******************************************************************************
- This is the Brownian Motion function.
- Place any comments and papers you used to get parameters for this function here.
- The below commented out function is one I ased to get Brownian Motion in another project.
+ Brownian Motion using Wiener Process
+ 
+ Physics from:
+ - Volpe & Volpe (Am. J. Phys. 2013), Section II:
+   Finite difference solution (Eq. 10): xi = xi-1 + sqrt(2*D*Dt) * wi
+   "wi are random numbers with zero mean and unit variance"
+ 
+ - ThorLabs User Guide Section 7.5.2:
+   Eq. 22: F_R = 6*pi*eta*R*v (Stokes frictional force)
+   Eq. 23: m = 2*k_B*T / (3*pi*eta*R) (MSD slope)
+   "The 1 um spheres can be more easily sent into motion by impact 
+    with the water molecules than larger spheres"
+ 
+ Your requirements:
+   - Target RMS displacement: sqrt(7) um for R = 5 um particle
+   - Time interval: 50 seconds
+   - Tunable coefficient: A
 *******************************************************************************/
-/*
-__device__ float4 brownian_motion(curandState_t* states, int id)
+/******************************************************************************
+This is the Brownian Motion function.
+Place any comments and papers you used to get parameters for this function here.
+The below commented out function is one I ased to get Brownian Motion in another project.
+*******************************************************************************/
+__device__ float4 brownian_motion(curandState_t* states, int id, float4 pos, float dt)
 {
-	float mag = 100.0;
-	float4 f;
-	float randx = mag*(curand_uniform(&states[id])*2.0 - 1.0);
-        float randy = mag*(curand_uniform(&states[id])*2.0 - 1.0);
-        float randz = mag*(curand_uniform(&states[id])*2.0 - 1.0);
-        
-        f.x = randx;
-        f.y = randy;
-        f.z = randz;
-	
-	return(f);
+    float4 f;
+    f.x = 0.0f;
+    f.y = 0.0f;
+    f.z = 0.0f;
+    f.w = 0.0f;  
+    // Get particle radius from diameter (stored in pos.w)
+    float radius = pos.w / 2.0f;  // micrometers  
+    // Safety check
+    if(radius <= 0.0f || dt <= 0.0f)
+    {
+        return f;
+    }  
+    // ============================================================
+    // PARAMETERS
+    // ============================================================  
+    // Tunable coefficient - adjust to calibrate sqrt(7) um RMS
+    float A = 1.0f;  
+    // Reference particle radius
+    float R_ref = 5.0f;  // micrometers  
+    // Target RMS displacement and time
+    float targetRMS = sqrtf(7.0f);  // sqrt(7) um
+    float targetTime = 50.0f * 1000.0f;  // 50 seconds in ms  
+    // ============================================================
+    // DIFFUSION COEFFICIENT
+    // From Volpe & Volpe Eq. 10: displacement = sqrt(2*D*dt) * w
+    // After time t, RMS = sqrt(2*D*t) for 1D, sqrt(4*D*t) for 2D
+    // So: D = targetRMS^2 / (4 * targetTime)
+    // ============================================================  
+    float D = (targetRMS * targetRMS) / (4.0f * targetTime);  
+    // Scale D for particle size (larger particles diffuse less)
+    // ThorLabs Section 7.5.2 [6]
+    D = D * (R_ref / radius);  
+    // ============================================================
+    // WIENER PROCESS
+    // From Volpe & Volpe Section II [4]:
+    // "wi are random numbers with zero mean and unit variance"
+    // curand_normal() returns N(0,1)
+    // ============================================================  
+    float w_x = curand_normal(&states[id]);
+    float w_y = curand_normal(&states[id]);
+    float w_z = curand_normal(&states[id]);  
+    // ============================================================
+    // CONVERT DISPLACEMENT TO FORCE
+    // From Volpe Eq. 10: displacement per step = sqrt(2*D*dt) * w
+    // To get force: F = (displacement / dt) * gamma
+    // where gamma is drag coefficient from ThorLabs Eq. 22 [6]
+    // ============================================================  
+    float displacementAmplitude = sqrtf(2.0f * D * dt);  
+    // Apply tunable coefficient A with sqrt(7)/A scaling
+    float forceAmplitude = A * (targetRMS / A) * displacementAmplitude / dt * curand_normal(&states[id]);  
+    f.x = forceAmplitude * w_x;
+    f.y = forceAmplitude * w_y;
+    f.z = forceAmplitude * w_z;  
+    return f;
 }
-*/
-
-// This is an example of brownian motion I used in another project.
-/*
-void brownian_motion(float3 *force)
-{
-	int i,under_normal_curve;
-	float mag, angle1, angle2;
-	float x,y,normal_hieght,temp;
-	
-	temp = 4.0*g_drag*DT;
-	under_normal_curve = NO;
-	
-	while(under_normal_curve == NO)
-	{
-		x = 2.0*1.0*(float)rand()/RAND_MAX - 1.0;
-		y = 1.0*(float)rand()/RAND_MAX;
-		normal_hieght = 1.0*exp(-x*x/temp);
-		if(y <= normal_hieght)
-		{
-			mag = x;
-			under_normal_curve = YES;
-		}
-	}	
-	
-	for(i = 0; i < NUMBER_OF_BODIES; i++)
-	{
-		angle1 = PI*(float)rand()/RAND_MAX;
-		angle2 = 2.0*PI*(float)rand()/RAND_MAX;
-		force[i].x += mag*sinf(angle1)*cosf(angle2);
-		force[i].y += mag*sinf(angle1)*sinf(angle2);
-		force[i].z += mag*cosf(angle1);
-	}
-}
-*/
 

@@ -6,17 +6,17 @@ Time Unit is millisecond or 10E-3 seconds (ms)
 
 ******************** MICROPLASTIC INFO **************************************
 This should be the number of microplastics you want to be randomly distributed in the solution.
-NumberOfMicroPlastics = 1024;
+NumberOfMicroPlastics = 256;
 
 The max intial velocity used in setting up the microplastics. It is a max for the x, y, and z velocities not the actual mav velocity.
 MaxMicroPlastics1DVelocity = 1000.0;
 
 The next two should be the density range for the microplastics. The typical values are given in grams/cm^3.
 We need this in mg/mm^3. To do this you need to multiply by 10^-6.
-Chris said 0.9 gr/cm^3 so this would be 9.0e-7;
-DensityOfMicroPlasticMin = 9.0e-7; 
+Chris said 0.7 gr/cm^3 so this would be 7.0e-7 or ~2.0 gr/cm^3 (depends on the plastic);
+DensityOfMicroPlasticMin = 7.0e-7; 
 
-DensityOfMicroPlasticMax = 9.0e-7;;
+DensityOfMicroPlasticMax = 2.0e-6;;
 
 The next two should be the diameter range for the microplastics in micro meters. (Typical 100 - 5000)
 Chris said 5 micrometers.
