@@ -9,14 +9,14 @@ This should be the number of microplastics you want to be randomly distributed i
 NumberOfMicroPlastics = 256;
 
 The max intial velocity used in setting up the microplastics. It is a max for the x, y, and z velocities not the actual mav velocity.
-MaxMicroPlastics1DVelocity = 1000.0;
+MaxMicroPlastics1DVelocity = 5.0;
 
 The next two should be the density range for the microplastics. The typical values are given in grams/cm^3.
 We need this in mg/mm^3. To do this you need to multiply by 10^-6.
 Chris said 0.7 gr/cm^3 so this would be 7.0e-7 or ~2.0 gr/cm^3 (depends on the plastic);
-DensityOfMicroPlasticMin = 7.0e-7; 
+DensityOfMicroPlasticMin = 0.7; 
 
-DensityOfMicroPlasticMax = 2.0e-6;;
+DensityOfMicroPlasticMax = 2.0;
 
 The next two should be the diameter range for the microplastics in micro meters. (Typical 100 - 5000)
 Chris said 5 micrometers.
@@ -38,7 +38,7 @@ PolymersConnectionLength = 0.0001415;
 
 This should be the density for the polymer. The typical values are given in grams/cm^3.
 We need this in mg/mm^3. To do this you need to multiply by 10^-6.
-DensityOfPolymer = 1.0e-6;
+DensityOfPolymer = 1.0;
 
 This should be the diameter of the polymer in micrometers. (Tyipical 45)
 DiameterOfPolymer = 45.0;
@@ -48,18 +48,18 @@ DiameterOfPolymer = 45.0;
 This is the radius of the beaker in micrometers.
 Standard Beaker Radius is 4900 micrometers 
 87mm outside diamter, standard looks to be 5mm thick, so 38.5 mm? (Tyipical 38500.0)
-38500.0;
+
 Chris said we would look at an area with radius 100 microns and a hieght of 100 microns (hieght of 200 looks better).
 BeakerRadius = 100.0;
 
 This is the height of the fliud in the beaker in micrometers.
 Fluid height for this case is 118000 micrometers 100 (Tyipical 91440.0)
-91440.0;
+
 FluidHeight = 200.0;
 
 ******************** Fluid INFO **************************************
 
-FluidDensity = 1.0e-6
+FluidDensity = 1.0;
 
 Drag = 0.0005; 
 
@@ -67,7 +67,7 @@ Drag = 0.0005;
 
 TotalRunTime = 100000.0;
 
-Dt = 0.0001;
+Dt = 0.01;
 
 DrawRate = 20;
 

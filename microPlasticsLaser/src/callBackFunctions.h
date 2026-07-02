@@ -192,7 +192,14 @@ void KeyPressed(unsigned char key, int x, int y)
 			terminalPrint();
 		}
 	}
-	
+		
+	if(key == 'L')
+	{
+		LaserDebugMode = (LaserDebugMode == 0) ? 1 : 0;
+		FirstHitRayIndex = -1;  // reset so it can find a fresh hit
+		terminalPrint();
+	}
+
 	if(key == 'g')
 	{
 		if(GravityFlag == 1) 

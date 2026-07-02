@@ -1,6 +1,29 @@
 //Optimized using shared memory and on chip memory 																																			
 // nvcc microPlastics.cu -o microPlastics -lglut -lm -lGLU -lGL
 //To stop hit "control c" in the window you launched it from.
+
+// =====================================================================
+//  SCALED UNIT SYSTEM (consistent, near-real-time-friendly)
+//
+//   Length  : 1 unit = 1 micrometer   (um)
+//   Time    : 1 unit = 1 millisecond  (ms)
+//   Mass    : 1 unit = 1 picogram     (pg)
+//
+//  Derived:
+//   Velocity         : um/ms        ( = mm/s in SI)
+//   Acceleration     : um/ms^2      ( = m/s^2 in SI — gravity g = 9.81!)
+//   Force            : pg*um/ms^2   ( = femtoNewton, fN, = 1e-15 N)
+//   Energy           : pg*um^2/ms^2 ( = zettaJoule,  zJ, = 1e-21 J)
+//   Density          : pg/um^3      ( = g/cm^3)
+//
+//  Useful constants in these units:
+//   kB              = 1.38e-2 pg*um^2/ms^2/K     (Boltzmann)
+//   eta (water)     = 1.0e3    pg/(um*ms)         (dynamic viscosity) 
+//   c (light)       = 3.0e11   um/ms              (speed of light) 
+//   g (gravity)     = 9.81     um/ms^2
+// =====================================================================
+
+
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -24,7 +47,11 @@ FILE* ffmpeg;
 #define PI 3.141592654
 #define BLOCK 256
 
-#define K_BOLTZMANN 1.38e-23f	//boltzmann constant in J/K
+#define K_BOLTZMANN 1.38e-2f	//boltzmann constant in pg*um^2/ms^2/K 
+
+#include "./forceFunctions.h"
+#include "./histogram.h"
+#include "./rayTraceLaser.h"
 
 FILE* MovieFile;
 int* Buffer;
@@ -77,7 +104,10 @@ int ContainerFlag;
 int ParticleInteractionFlag;
 
 float4 *BodyPosition, *BodyVelocity, *BodyForce;
+RayData *RaysGPU;
+float4  *LaserForceGPU;
 float4 *BodyPositionGPU, *BodyVelocityGPU, *BodyForceGPU;
+float3 *MicroPlasticColors; // to make them rainbow- take out if you want them back to normal 
 int *PolymerChainLength;
 int *PolymerConnectionA, *PolymerConnectionB;
 int *PolymerConnectionAGPU, *PolymerConnectionBGPU;
@@ -89,6 +119,19 @@ float4 CenterOfSimulation;
 float4 DistanceFromCenter = make_float4(0.0, 0.0, 0.0, 0.0);
 float4 AngleOfSimulation;
 float ShakeItUpMag;
+float LaserBeamRadius;
+float LaserBeamCenterY;
+int   LaserDebugMode = 0;        // 0 = normal, 1 = freeze on first hit
+int   FirstHitRayIndex = -1;     // -1 = no hit yet
+int   FirstHitParticle = -1;
+float FirstHitX, FirstHitY, FirstHitZ;
+float FirstHitFs, FirstHitFg;
+float FirstHitFx, FirstHitFy, FirstHitFz;
+float FirstHitAngleI, FirstHitAngleR;
+float4 *DebugHitInfoGPU;  // per-ray debug data
+float4 *DebugHitInfo;     // CPU side
+float4 *DebugForceGPU;
+float4 *DebugForce;
 
 
 int DebugFlag;
@@ -119,8 +162,7 @@ double UpX;
 double UpY;
 double UpZ;
 
-#include "./forceFunctions.h"
-#include "./histogram.h"
+
 
 // Prototyping functions
 void readSimulationParameters();
@@ -132,7 +174,7 @@ void setInitailConditions();
 void drawPicture();
 void errorCheck(const char*);
 __global__ void init_curand(unsigned int, curandState_t*);
-__global__ void getForces(curandState_t*, float4 *, float4 *, float4 *, int *, int *, float, int, int, float, float, float, int, float, int, float, int, float, int, int, int, float);
+__global__ void getForces(curandState_t*, float4 *, float4 *, float4 *, int *, int *, float, int, int, float, float, float, int, float, int, float, int, int, int, int, float, float4 *);
 __global__ void moveBodies(float4 *, float4 *, float4 *, float, int);
 void nBody();
 float3 getLinearMomentumOfMicroplastics();
@@ -331,6 +373,28 @@ void allocateMemory()
 	errorCheck("cudaMalloc BodyForceGPU");
 	
 	cudaMalloc((void**)&DevStates, NumberOfBodies * sizeof(curandState_t));
+
+	cudaMalloc((void**)&RaysGPU, NUM_RAYS * sizeof(RayData));
+	errorCheck("cudaMalloc RaysGPU");
+	cudaMalloc((void**)&LaserForceGPU, NumberOfBodies * sizeof(float4));
+	errorCheck("cudaMalloc LaserForceGPU");
+
+	/*cudaMalloc((void**)&DebugHitInfoGPU, NUM_RAYS * sizeof(float4));
+	errorCheck("cudaMalloc DebugHitInfoGPU");
+	DebugHitInfo = (float4*)malloc(NUM_RAYS * sizeof(float4));
+
+	cudaMalloc((void**)&DebugForceGPU, NUM_RAYS * sizeof(float4));
+	errorCheck("cudaMalloc DebugForceGPU");
+	DebugForce = (float4*)malloc(NUM_RAYS * sizeof(float4));*/
+
+	int debugSize = NUM_RAYS * DEBUG_HITS_PER_RAY;
+	cudaMalloc((void**)&DebugHitInfoGPU, debugSize * sizeof(float4));
+	errorCheck("cudaMalloc DebugHitInfoGPU");
+	DebugHitInfo = (float4*)malloc(debugSize * sizeof(float4));
+	cudaMalloc((void**)&DebugForceGPU, debugSize * sizeof(float4));
+	errorCheck("cudaMalloc DebugForceGPU");
+	DebugForce = (float4*)malloc(debugSize * sizeof(float4));
+
 	
 	printf("\n Memory has been allocated.\n");
 }
@@ -384,15 +448,15 @@ __global__ void getForcesSetup(curandState_t* states, float4 *pos, float4 *vel, 
 		forceVectorSum.z += forceVector.z;
 		
 		// This adds on the fliud drag force.
-		forceVector = getDragForces(drag, vel[myId]);
+		forceVector = getDragForces(pos[myId], vel[myId]);
 		forceVectorSum.x += forceVector.x;
 		forceVectorSum.y += forceVector.y;
 		forceVectorSum.z += forceVector.z;
 		
 		// Tranfering all the forces to my force function
-		force[myId].x += forceVectorSum.x;
-		force[myId].y += forceVectorSum.y;
-		force[myId].z += forceVectorSum.z;
+		force[myId].x = forceVectorSum.x;
+		force[myId].y = forceVectorSum.y;
+		force[myId].z = forceVectorSum.z;
     	}
 }
 
@@ -492,7 +556,8 @@ void setInitailConditions()
 	double TotalPolymerLength;
 	double spaceBetweenPolymerCenters;
 	double startX,startY,startZ;
-	
+
+
 	// Zeroing out everything just for safety
 	for(int i = 0; i < NumberOfBodies; i++)
 	{
@@ -538,7 +603,17 @@ void setInitailConditions()
 		// Setting mass
 		BodyForce[i].w = density*(4.0/3.0)*PI*(BodyPosition[i].w/2.0)*(BodyPosition[i].w/2.0)*(BodyPosition[i].w/2.0);	
 	}
-	
+
+		// Assign random colors to each microplastic - not necessary just makes it more fun to look at. You can take it out if you want them all to be the same color again.
+	MicroPlasticColors = (float3*)malloc(NumberOfMicroPlastics * sizeof(float3));
+	for(int i = 0; i < NumberOfMicroPlastics; i++)
+	{
+		MicroPlasticColors[i].x = (float)rand() / (float)RAND_MAX; // Red
+		MicroPlasticColors[i].y = (float)rand() / (float)RAND_MAX; // Green
+		MicroPlasticColors[i].z = (float)rand() / (float)RAND_MAX; // Blue
+	}
+
+
 	// Setting intial positions of polymers
 	spaceBetweenPolymerCenters = PolymersConnectionLength+DiameterOfPolymer;
 	k = 0;
@@ -655,6 +730,7 @@ void setInitailConditions()
 	printf("\n Initial conditions have been set.\n");
 }
 
+
 void drawPicture()
 {
 	glClear(GL_COLOR_BUFFER_BIT);
@@ -703,7 +779,8 @@ void drawPicture()
 		}
 	}
 	
-	// Drawing Microplastics
+	/*
+	// Drawing Microplastics- white
 	for(int i = NumberOfPolymers; i < NumberOfBodies; i++)
 	{
 		glColor3d(MicroPlasticRed, MicroPlasticGreen, MicroPlasticBlue);
@@ -712,7 +789,19 @@ void drawPicture()
 			glutSolidSphere(BodyPosition[i].w/2.0, 30, 30);
 		glPopMatrix();
 	}
-	
+	*/
+
+	// Drawing Microplastics with random colors- just for fun. You can take out the random colors and make them all the same color again if you want.
+	for(int i = NumberOfPolymers; i < NumberOfBodies; i++)
+	{
+		int colorIndex = i - NumberOfPolymers;
+		glColor3d(MicroPlasticColors[colorIndex].x, MicroPlasticColors[colorIndex].y, MicroPlasticColors[colorIndex].z);
+		glPushMatrix();
+			glTranslatef(BodyPosition[i].x, BodyPosition[i].y, BodyPosition[i].z);
+			glutSolidSphere(BodyPosition[i].w/2.0, 30, 30);
+		glPopMatrix();
+	}
+
 	// Drawint a red sphere at the origin for reference.
 	glColor3d(1.0, 0.0, 0.0);
 	glPushMatrix();
@@ -720,7 +809,7 @@ void drawPicture()
 		glutSolidSphere(DiameterOfMicroPlasticMax, 30, 30);
 	glPopMatrix();
 	
-	/*
+	
 	// Drawing the outline of the Beaker.
 	if(RadialConfinementViewingAids == 1)
 	{
@@ -758,7 +847,7 @@ void drawPicture()
 			glEnd();
 		}
 	}
-	*/
+	
 	// Drawing the stirring.
 	if(StirFlag == 1)
 	{
@@ -770,6 +859,69 @@ void drawPicture()
 		glEnd();
 	}
 	
+	// Draw laser rays if laser is on
+	if(LaserFlag == 1)
+	{
+		static RayData *raysHost = NULL;
+		if(raysHost == NULL) raysHost = (RayData*)malloc(NUM_RAYS * sizeof(RayData));
+		cudaError_t err = cudaMemcpy(raysHost, RaysGPU,
+                             NUM_RAYS * sizeof(RayData),
+                             cudaMemcpyDeviceToHost);
+
+		if(err != cudaSuccess)
+		{
+			printf("Ray copy failed: %s\n", cudaGetErrorString(err));
+		}
+
+		glDisable(GL_LIGHTING);
+		glLineWidth(1.0f);
+		glColor3f(1.0f, 0.2f, 0.2f);
+		glBegin(GL_LINES);
+		for(int i = 0; i < NUM_RAYS; i += 200)
+		{
+			if(i == FirstHitRayIndex) continue;
+			// Draw the ray from its origin (above the beaker) all the way down through the fluid.
+			// This is purely visual — physics is unaffected.
+			float t = FluidHeight * 4.0f;   // long enough to pass through the entire beaker
+			glVertex3f(raysHost[i].origin.x, raysHost[i].origin.y, raysHost[i].origin.z);
+			glVertex3f(raysHost[i].origin.x + raysHost[i].direction.x * t,
+				 raysHost[i].origin.y + raysHost[i].direction.y * t, 
+				 raysHost[i].origin.z + raysHost[i].direction.z * t);
+		}
+		glEnd();
+
+		// === NEW MAGENTA HIT-RAY BLOCK GOES HERE ===
+		if(FirstHitRayIndex >= 0 && FirstHitRayIndex < NUM_RAYS)
+		{
+			// Bright magenta thick line for the hit ray - very obvious [4]
+			glLineWidth(8.0f);
+			glColor3f(1.0f, 0.0f, 1.0f);  // bright magenta
+			glBegin(GL_LINES);
+
+			// Draw the ray going its full length through the scene
+			float t = FluidHeight * 4.0f;   // long enough to pass through the entire beaker
+			glVertex3f(raysHost[FirstHitRayIndex].origin.x,
+					raysHost[FirstHitRayIndex].origin.y,
+					raysHost[FirstHitRayIndex].origin.z);
+			glVertex3f(raysHost[FirstHitRayIndex].origin.x + raysHost[FirstHitRayIndex].direction.x * t,
+					raysHost[FirstHitRayIndex].origin.y + raysHost[FirstHitRayIndex].direction.y * t,
+					raysHost[FirstHitRayIndex].origin.z + raysHost[FirstHitRayIndex].direction.z * t);
+			glEnd();
+
+			// Draw a bright yellow sphere at the first hit point to mark it
+			glEnable(GL_LIGHTING);
+			glColor3f(1.0f, 1.0f, 0.0f);  // bright yellow
+			glPushMatrix();
+				glTranslatef(FirstHitX, FirstHitY, FirstHitZ);
+				glutSolidSphere(BodyPosition[FirstHitParticle].w * 0.3, 20, 20);
+			glPopMatrix();
+			glDisable(GL_LIGHTING);
+		}
+		// === END NEW BLOCK ===
+
+		glEnable(GL_LIGHTING);
+	}
+
 	glutSwapBuffers();
 
 	// Captures frames if you are making a movie.
@@ -805,7 +957,7 @@ __global__ void init_curand(unsigned int seed, curandState_t* states)
 /******************************************************************************
  This function controlls all the forces that act on the bodies.
 *******************************************************************************/
-__global__ void getForces(curandState_t* states, float4 *pos, float4 *vel, float4 *force, int *linkA, int *linkB, float length, int nPolymer, int nPlastics, float beakerRadius, float fluidHeight, float fluidDensity, int stirFlag, float theta, int shakeItUpFlag, float ShakeItUpMag, int dragFlag, float drag, int laserFlag, int gravityFlag, int brownianFlag, int containerFlag, int particleInteractionFlag, float dt)
+__global__ void getForces(curandState_t* states, float4 *pos, float4 *vel, float4 *force, int *linkA, int *linkB, float length, int nPolymer, int nPlastics, float beakerRadius, float fluidHeight, float fluidDensity, int stirFlag, float theta, int shakeItUpFlag, float ShakeItUpMag, int dragFlag, int laserFlag, int gravityFlag, int brownianFlag, int containerFlag, int particleInteractionFlag, float dt, float4 *laserForce)
 {
 	int myId, yourId;
 	int nBodies;
@@ -831,7 +983,7 @@ __global__ void getForces(curandState_t* states, float4 *pos, float4 *vel, float
 		
 		//diameterMe = posMe.w;
 		densityMe = vel[myId].w;
-		massMe = force[myId].w;
+		massMe = pos[myId].w;   // TEMP FIX (better than force[].w)
 		
 		forceVectorSum.x = 0.0;
 		forceVectorSum.y = 0.0;
@@ -930,19 +1082,20 @@ __global__ void getForces(curandState_t* states, float4 *pos, float4 *vel, float
 			vel[myId].z += velocityVector.z;
 		}
 		
-		// This is the force from fliud drag.
+		/*// This is the force from fliud drag.
 		if(dragFlag == 1)
 		{
-			forceVector = getDragForces(drag, velMe);
+			forceVector = getDragForces(posMe, velMe);
 			forceVectorSum.x += forceVector.x;
 			forceVectorSum.y += forceVector.y;
 			forceVectorSum.z += forceVector.z;
 		}
+			*/
 		
 		// This is the force from the laser.
 		if(laserFlag == 1)
 		{
-			forceVector = getLaserForces(posMe);
+			forceVector = getLaserForces(laserForce[myId]);
 			forceVectorSum.x += forceVector.x;
 			forceVectorSum.y += forceVector.y;
 			forceVectorSum.z += forceVector.z;
@@ -960,67 +1113,210 @@ __global__ void getForces(curandState_t* states, float4 *pos, float4 *vel, float
 *******************************************************************************/
 __global__ void moveBodies(float4 *pos, float4 *vel, float4 *force, float dt, int n)
 {
-	int id = threadIdx.x + blockDim.x*blockIdx.x;
-	if(id < n)
-	{	
-		vel[id].x += (force[id].x/force[id].w)*dt;
-		vel[id].y += (force[id].y/force[id].w)*dt;
-		vel[id].z += (force[id].z/force[id].w)*dt;
+    int id = threadIdx.x + blockDim.x * blockIdx.x;
 
-		pos[id].x += vel[id].x*dt;
-		pos[id].y += vel[id].y*dt;
-		pos[id].z += vel[id].z*dt;
-	}
+    if(id < n)
+    {
+        float mass = force[id].w;
+		if(mass < 1e-20f)
+		{
+			vel[id].x = 0.0f;
+			vel[id].y = 0.0f;
+			vel[id].z = 0.0f;
+			return;
+		}
+        // Radius and drag coefficient (Stokes)
+        float R = pos[id].w * 0.5f;
+
+        const float eta = 1.0e3f;
+        const float drag_scale = 0.01f;
+
+        float gamma = 6.0f * 3.141592654f * eta * R * drag_scale;
+
+        // acceleration
+        float ax = force[id].x / mass;
+        float ay = force[id].y / mass;
+        float az = force[id].z / mass;
+
+        // semi-implicit stable update
+        float invDenom = 1.0f / (1.0f + gamma * dt / mass);
+
+        vel[id].x = (vel[id].x + ax * dt) * invDenom;
+        vel[id].y = (vel[id].y + ay * dt) * invDenom;
+        vel[id].z = (vel[id].z + az * dt) * invDenom;
+
+        // NaN safety
+        if(!isfinite(vel[id].x)) vel[id].x = 0.0f;
+        if(!isfinite(vel[id].y)) vel[id].y = 0.0f;
+        if(!isfinite(vel[id].z)) vel[id].z = 0.0f;
+
+        // update position
+        pos[id].x += vel[id].x * dt;
+        pos[id].y += vel[id].y * dt;
+        pos[id].z += vel[id].z * dt;
+
+        // NaN safety
+        if(!isfinite(pos[id].x)) pos[id].x = 0.0f;
+        if(!isfinite(pos[id].y)) pos[id].y = 0.0f;
+        if(!isfinite(pos[id].z)) pos[id].z = 0.0f;
+    }
 }
-
 void nBody()
 {
-	if(Pause != 1)
-	{	
-		getForces<<<Grids, Blocks>>>(DevStates, BodyPositionGPU, BodyVelocityGPU, BodyForceGPU, PolymerConnectionAGPU, PolymerConnectionBGPU, PolymersConnectionLength, NumberOfPolymers, NumberOfMicroPlastics, BeakerRadius, FluidHeight, FluidDensity, StirFlag, Theta, ShakeItUpFlag, ShakeItUpMag, DragFlag, Drag, LaserFlag, GravityFlag, BrownianFlag, ContainerFlag, ParticleInteractionFlag, Dt);
-		errorCheck("getForces");
-		moveBodies<<<Grids, Blocks>>>(BodyPositionGPU, BodyVelocityGPU, BodyForceGPU, Dt, NumberOfBodies);
-		errorCheck("moveBodies");
-        	
-        	DrawTimer++;
-		if(DrawTimer == DrawRate) 
-		{
-			cudaMemcpy( BodyPosition, BodyPositionGPU, NumberOfBodies*sizeof(float4), cudaMemcpyDeviceToHost );
-			cudaMemcpy( BodyVelocity, BodyVelocityGPU, NumberOfBodies*sizeof(float4), cudaMemcpyDeviceToHost );
-			cudaMemcpy( BodyForce, BodyForceGPU, NumberOfBodies*sizeof(float4), cudaMemcpyDeviceToHost );
-			//updateMomentumHistograms(BodyVelocity, BodyForce, NumberOfPolymers, NumberOfBodies);
-			drawPicture();
-			//printf("\n Time = %f", RunTime);
+    if(Pause != 1)
+    {
+        if(LaserFlag == 1)
+        {
+			int debugSize = NUM_RAYS * DEBUG_HITS_PER_RAY;
 
-			//update and redraw the histogram every time we draw the main window. This way the histogram is not slowing down the main window.
-			updateMomentumHistograms(BodyVelocity, BodyForce, NumberOfPolymers, NumberOfBodies);
-			glutSetWindow(HistogramWindow);
-			glutPostRedisplay();
-			glutSetWindow(Window); //switching back to the main window.
-			DrawTimer = 0;
-		}
-		
-		PrintTimer++;
-		if(PrintRate <= PrintTimer) 
-		{
-			cudaMemcpy( BodyPosition, BodyPositionGPU, NumberOfBodies*sizeof(float4), cudaMemcpyDeviceToHost );
-			cudaMemcpy( BodyVelocity, BodyVelocityGPU, NumberOfBodies*sizeof(float4), cudaMemcpyDeviceToHost );
-			cudaMemcpy( BodyForce, BodyForceGPU, NumberOfBodies*sizeof(float4), cudaMemcpyDeviceToHost );
-			terminalPrint();
-			PrintTimer = 0;
-			//printf("\n time = %f", RunTime);
-		}
-		
-		RunTime += Dt; 
-		if(TotalRunTime < RunTime)
-		{
-			printf("\n\n Done\n");
-			exit(0);
-		}
-		
-		Theta += StirAngularVelosity*Dt;
-		if(2.0*PI < Theta) Theta = 0.0;
-	}
+            dim3 rayGrid((NUM_RAYS - 1)/BLOCK + 1, 1, 1);
+            dim3 bodyGrid((NumberOfBodies - 1)/BLOCK + 1, 1, 1);
+
+            zeroLaserForceKernel<<<bodyGrid, Blocks>>>(LaserForceGPU, NumberOfBodies);
+            errorCheck("zeroLaserForceKernel");
+
+            initRaysKernel<<<rayGrid, Blocks>>>(RaysGPU, DevStates, LaserBeamRadius, LaserBeamCenterY);
+            errorCheck("initRaysKernel");
+
+            // Zero the debug arrays so old hits don't linger
+            cudaMemset(DebugHitInfoGPU, 0, debugSize * sizeof(float4));
+            cudaMemset(DebugForceGPU, 0, debugSize * sizeof(float4));
+
+            traceRaysKernel<<<rayGrid, Blocks>>>(RaysGPU, BodyPositionGPU, LaserForceGPU,
+                                                  DebugHitInfoGPU, DebugForceGPU,
+                                                  NumberOfPolymers, NumberOfBodies);
+            errorCheck("traceRaysKernel");
+
+            // If in debug mode, find first hit ray and freeze
+            if(LaserDebugMode == 1 && FirstHitRayIndex < 0)
+            {
+                cudaMemcpy(DebugHitInfo, DebugHitInfoGPU, debugSize * sizeof(float4), cudaMemcpyDeviceToHost);
+                cudaMemcpy(DebugForce, DebugForceGPU, debugSize * sizeof(float4), cudaMemcpyDeviceToHost);
+
+                // Find the first ray that hit something and print ALL its bounces
+int foundRay = -1;
+for(int i = 0; i < NUM_RAYS; i++)
+{
+    int slot0 = i * DEBUG_HITS_PER_RAY;
+    if(DebugForce[slot0].x != 0.0f || DebugForce[slot0].y != 0.0f || DebugForce[slot0].z != 0.0f)
+    {
+        foundRay = i;
+        break;
+    }
+}
+
+				if(foundRay >= 0)
+				{
+					FirstHitRayIndex = foundRay;
+					cudaMemcpy(BodyPosition, BodyPositionGPU, NumberOfBodies*sizeof(float4), cudaMemcpyDeviceToHost);
+
+					printf("\n\033[0;36m");
+					printf("==========================================================\n");
+					printf("  RAY %d - TRACING ALL HITS (shadowing) [4]\n", foundRay);
+					printf("==========================================================\n");
+					printf("\033[0m");
+
+					int hitCount = 0;
+					for(int b = 0; b < DEBUG_HITS_PER_RAY; b++)
+					{
+						int slot = foundRay * DEBUG_HITS_PER_RAY + b;
+						if(DebugForce[slot].x == 0.0f && DebugForce[slot].y == 0.0f && DebugForce[slot].z == 0.0f)
+							break;
+
+						hitCount++;
+						int particleHit = (int)DebugHitInfo[slot].x;
+						float thI = DebugHitInfo[slot].y;
+						float thR = DebugHitInfo[slot].z;
+						float Fs = DebugHitInfo[slot].w;
+						float Fg = DebugForce[slot].w;
+
+						printf("\n\033[0;33m  --- HIT #%d (bounce %d) ---\033[0m\n", hitCount, b);
+						printf("  Hit particle index:  %d\n", particleHit);
+						if(particleHit >= 0 && particleHit < NumberOfBodies)
+						{
+							printf("  Particle position:   (%.3f, %.3f, %.3f)\n",
+								BodyPosition[particleHit].x,
+								BodyPosition[particleHit].y,
+								BodyPosition[particleHit].z);
+						}
+						printf("  Angle of incidence:  %.4f rad  (%.2f deg)\n", thI, thI*180.0f/PI);
+						printf("  Angle of refraction: %.4f rad  (%.2f deg)\n", thR, thR*180.0f/PI);
+						printf("  Fs (parallel to beam):      %.4e N\n", Fs);
+						printf("  Fg (perpendicular to beam): %.4e N\n", Fg);
+						printf("  Total force on particle:\n");
+						printf("    Fx = %.4e\n", DebugForce[slot].x);
+						printf("    Fy = %.4e  (parallel to beam)\n", DebugForce[slot].y);
+						printf("    Fz = %.4e\n", DebugForce[slot].z);
+					}
+
+					// Save first hit point for drawing
+					int slot0 = foundRay * DEBUG_HITS_PER_RAY;
+					FirstHitParticle = (int)DebugHitInfo[slot0].x;
+					if(FirstHitParticle >= 0 && FirstHitParticle < NumberOfBodies)
+					{
+						FirstHitX = BodyPosition[FirstHitParticle].x;
+						FirstHitY = BodyPosition[FirstHitParticle].y + BodyPosition[FirstHitParticle].w / 2.0f;
+						FirstHitZ = BodyPosition[FirstHitParticle].z;
+					}
+
+					printf("\n==========================================================\n");
+					printf("  Total hits on this ray: %d\n", hitCount);
+					printf("  Simulation frozen. Press 'r' to resume, 'L' to re-arm.\n\n");
+
+					cudaDeviceSynchronize();
+					Pause = 1;
+					LaserDebugMode = 0;
+				}
+            }
+        }
+
+        getForces<<<Grids, Blocks>>>(DevStates, BodyPositionGPU, BodyVelocityGPU, BodyForceGPU,
+                                      PolymerConnectionAGPU, PolymerConnectionBGPU,
+                                      PolymersConnectionLength, NumberOfPolymers, NumberOfMicroPlastics,
+                                      BeakerRadius, FluidHeight, FluidDensity, StirFlag, Theta,
+                                      ShakeItUpFlag, ShakeItUpMag, DragFlag, LaserFlag,
+                                      GravityFlag, BrownianFlag, ContainerFlag,
+                                      ParticleInteractionFlag, Dt, LaserForceGPU);
+        errorCheck("getForces");
+
+        moveBodies<<<Grids, Blocks>>>(BodyPositionGPU, BodyVelocityGPU, BodyForceGPU, Dt, NumberOfBodies);
+        errorCheck("moveBodies");
+
+        DrawTimer++;
+        if(DrawTimer == DrawRate)
+        {
+            cudaMemcpy(BodyPosition, BodyPositionGPU, NumberOfBodies*sizeof(float4), cudaMemcpyDeviceToHost);
+            cudaMemcpy(BodyVelocity, BodyVelocityGPU, NumberOfBodies*sizeof(float4), cudaMemcpyDeviceToHost);
+            cudaMemcpy(BodyForce, BodyForceGPU, NumberOfBodies*sizeof(float4), cudaMemcpyDeviceToHost);
+            drawPicture();
+
+            updateMomentumHistograms(BodyVelocity, BodyForce, NumberOfPolymers, NumberOfBodies);
+            glutSetWindow(HistogramWindow);
+            glutPostRedisplay();
+            glutSetWindow(Window);
+            DrawTimer = 0;
+        }
+
+        PrintTimer++;
+        if(PrintRate <= PrintTimer)
+        {
+            cudaMemcpy(BodyPosition, BodyPositionGPU, NumberOfBodies*sizeof(float4), cudaMemcpyDeviceToHost);
+            cudaMemcpy(BodyVelocity, BodyVelocityGPU, NumberOfBodies*sizeof(float4), cudaMemcpyDeviceToHost);
+            cudaMemcpy(BodyForce, BodyForceGPU, NumberOfBodies*sizeof(float4), cudaMemcpyDeviceToHost);
+            terminalPrint();
+            PrintTimer = 0;
+        }
+
+        RunTime += Dt;
+        if(TotalRunTime < RunTime)
+        {
+            printf("\n\n Done\n");
+            exit(0);
+        }
+
+        Theta += StirAngularVelosity*Dt;
+        if(2.0*PI < Theta) Theta = 0.0;
+    }
 }
 
 float3 getLinearMomentumOfMicroplastics()
@@ -1168,6 +1464,19 @@ void terminalPrint()
 		printf("\033[0;32m");
 		printf(BOLD_ON "Laser is On" BOLD_OFF);
 	}
+
+	printf("\n L: Laser Debug          - ");
+	if (LaserDebugMode == 0) 
+	{
+		printf("\033[0;31m");
+		printf(BOLD_ON "Debug Off (press capital L to arm)" BOLD_OFF); 
+	}
+	else 
+	{
+		printf("\033[0;33m");
+		printf(BOLD_ON "Debug ARMED - waiting for first hit..." BOLD_OFF);
+	}
+
 	printf("\n g: Gravity On/Off       - ");
 	if (GravityFlag == 0) 
 	{
@@ -1261,20 +1570,34 @@ void setup()
 	readSimulationParameters();
 	setNumberOfBodies();
 	allocateMemory();
+
+	// Initialize CURAND
+	//unsigned int seed = static_cast<unsigned int>(time(0));
+    int threads = 256;
+	int blocks = (NumberOfBodies + threads - 1) / threads;
+
+	init_curand<<<blocks, threads>>>(1234, DevStates);
+	errorCheck("init_curand");
+
 	setInitailConditions();
+	cudaDeviceSynchronize();
+
+	printf("\n=== UNIT SANITY CHECK ===\n");
+	printf(" BeakerRadius  = %.3f um\n", BeakerRadius);
+	printf(" FluidHeight   = %.3f um\n", FluidHeight);
+	printf(" Dt            = %.6f ms\n", Dt);
+	printf(" Particle dia  = %.3f um\n", BodyPosition[NumberOfPolymers].w);
+	printf(" Particle mass = %.3e pg\n", BodyForce[NumberOfPolymers].w);
+	printf("=========================\n");
+
 	cudaMemcpy( BodyPositionGPU, BodyPosition, NumberOfBodies*sizeof(float4), cudaMemcpyHostToDevice );
 	cudaMemcpy( BodyVelocityGPU, BodyVelocity, NumberOfBodies*sizeof(float4), cudaMemcpyHostToDevice );
 	cudaMemcpy( BodyForceGPU, BodyForce, NumberOfBodies*sizeof(float4), cudaMemcpyHostToDevice );
 	cudaMemcpy( PolymerConnectionAGPU, PolymerConnectionA, NumberOfPolymers*sizeof(int), cudaMemcpyHostToDevice );
 	cudaMemcpy( PolymerConnectionBGPU, PolymerConnectionB, NumberOfPolymers*sizeof(int), cudaMemcpyHostToDevice );
 	
-	// Initialize CURAND
-	//unsigned int seed = static_cast<unsigned int>(time(0));
-    	init_curand<<<Grids, Blocks>>>(1234, DevStates);
-    	errorCheck("init_curand");
-	
 	cudaSetDevice(0); // Select GPU device 0
-    	cudaDeviceSynchronize();
+    	
     	errorCheck("cudaSetDevice");
 	
 	DrawTimer = 0;
@@ -1286,17 +1609,25 @@ void setup()
 	TopView = 1;
 	LaserFlag = 0;
 	GravityFlag = 0;
-	BrownianFlag = 1;
+	BrownianFlag = 0;
 	RadialConfinementViewingAids = 1;
 	StirFlag = 0;
 	ShakeItUpFlag = 0;
 	DebugFlag = 0;
 	Theta = 0.0;
 
-	DragFlag = 1;      // Turn ON for proper Brownian motion physics
+	LaserBeamRadius = BeakerRadius / 10.0f;     // wider entry circle for cone
+	// Calculate the starting height of the rays to place the focal point at the beaker's vertical center.
+	// The focal point is at y = FluidHeight / 2.0f.
+	// The formula from initRaysKernel is: focusY = beamCenterY - beamRadius / sinThetaMax
+	// So, beamCenterY = focusY + beamRadius / sinThetaMax
+	// SIN_THETA_MAX is 0.8f, defined in rayTraceLaser.h [4]
+	LaserBeamCenterY = FluidHeight * 2.0f;
+
+	DragFlag = 0;      // Turn ON for proper Brownian motion physics
 	UsedDrag = Drag;   // Set UsedDrag to the value read from simulationSetup
-	ContainerFlag = 0; //0 container off, 1 container on 
-	ParticleInteractionFlag = 0; // 0 particle interactions off, 1 particle interactions on.
+	ContainerFlag = 1; //0 container off, 1 container on 
+	ParticleInteractionFlag = 1; // 0 particle interactions off, 1 particle interactions on.
 
 	StirAngularVelosity = (2.0*PI)/(100.0); // This is 10 revolution per second in milliseconds
 	
@@ -1312,6 +1643,7 @@ void setup()
 	
 	terminalPrint();
 }
+
 
 int main(int argc, char** argv)
 {
@@ -1387,3 +1719,4 @@ int main(int argc, char** argv)
 	
 	return 0;
 }
+
